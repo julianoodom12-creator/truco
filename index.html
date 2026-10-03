@@ -55,8 +55,6 @@ html,body{height:100%;overflow:hidden;font-family:'Segoe UI',system-ui,sans-seri
 .card.small .stl,.card.small .sbr{font-size:12px}
 .card.small .sc{font-size:12px}
 
-/* CONTROLES — linha horizontal no canto inferior esquerdo da mesa,
-   junto com o ícone da casa, fora da área das cartas */
 .controls{
   position:absolute;
   bottom:14px;
@@ -277,23 +275,81 @@ const VALUE_NAME = { 1:'Ás', 10:'Dama', 11:'Valete', 12:'Rei' };
 const LEVEL_PTS  = { 0: 1,  1: 3,  2: 6,  3: 9,  4: 12 };
 const LEVEL_NAME = { 0: 'Mão', 1: 'Truco', 2: 'Seis', 3: 'Nove', 4: 'Doze' };
 
+/* ============================================================
+   VOZ -- à prova de autoplay do navegador
+   - pré-carrega áudios
+   - destrava no primeiro clique (política de autoplay)
+   - loga no console quando falha (ajuda a debugar 404)
+   ============================================================ */
 const VOZ = {
   base: 'voz/',
   enabled: true,
+  unlocked: false,
+  cache: {},
+
+  preload(nome) {
+    if (this.cache[nome]) return this.cache[nome];
+    try {
+      const a = new Audio(this.base + nome + '.mp3');
+      a.preload = 'auto';
+      a.volume = 0.9;
+      this.cache[nome] = a;
+      return a;
+    } catch (e) { return null; }
+  },
+
   play(nome) {
     if (!this.enabled) return;
     try {
-      const a = new Audio(this.base + nome + '.mp3');
-      a.volume = 0.9;
-      a.play().catch(() => {});
-    } catch (e) {}
+      let a = this.cache[nome];
+      if (!a) {
+        a = new Audio(this.base + nome + '.mp3');
+        a.volume = 0.9;
+        this.cache[nome] = a;
+      }
+      a.currentTime = 0;
+      const p = a.play();
+      if (p && p.catch) {
+        p.catch(err => {
+          console.warn('[VOZ] Falha ao tocar:', nome, '-', err && err.name);
+          if (err && err.name === 'NotAllowedError') this.unlockNextClick();
+        });
+      }
+    } catch (e) {
+      console.warn('[VOZ] Exceção:', nome, e);
+    }
   },
+
   playSeq(nome, vezes = 2, delayMs = 550) {
     if (!this.enabled) return;
     for (let i = 0; i < vezes; i++)
       setTimeout(() => this.play(nome), i * delayMs);
+  },
+
+  unlockNextClick() {
+    if (this.unlocked) return;
+    const handler = () => {
+      try {
+        const a = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAAAA');
+        a.volume = 0;
+        a.play().then(() => { this.unlocked = true; }).catch(() => {});
+      } catch (e) {}
+      document.removeEventListener('click', handler);
+      document.removeEventListener('touchstart', handler);
+    };
+    document.addEventListener('click', handler, { once: true });
+    document.addEventListener('touchstart', handler, { once: true });
+  },
+
+  preloadAll() {
+    ['truco','seis','nove','doze','vai-caganera','nao-vou-querer-seu-facao','caganera-caganera','vitoria']
+      .forEach(n => this.preload(n));
+    this.unlockNextClick();
   }
 };
+
+if (document.readyState === 'complete') VOZ.preloadAll();
+else window.addEventListener('load', () => VOZ.preloadAll());
 
 function flutuar(txt, cor = '#22ff55') {
   const el = document.createElement('div');
