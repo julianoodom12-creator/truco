@@ -266,12 +266,6 @@ const VALUE_NAME = { 1:'Ás', 10:'Dama', 11:'Valete', 12:'Rei' };
 const LEVEL_PTS  = { 0: 1,  1: 3,  2: 6,  3: 9,  4: 12 };
 const LEVEL_NAME = { 0: 'Mão', 1: 'Truco', 2: 'Seis', 3: 'Nove', 4: 'Doze' };
 
-/* ============================================================
-   VOZ -- à prova de autoplay do navegador
-   - pré-carrega áudios
-   - destrava no primeiro clique (política de autoplay)
-   - loga no console quando falha (ajuda a debugar 404)
-   ============================================================ */
 const VOZ = {
   base: 'voz/',
   enabled: true,
@@ -371,12 +365,32 @@ function shuffle(a) {
 
 function manilhaValueFromVira(vira) {
   const order = [4,5,6,7,10,11,12,1,2,3];
-  return order[(order.indexOf(vira.rank) + 1) % order.length];
+  const rank = parseInt(vira.rank, 10);
+  let idx = order.indexOf(rank);
+  if (idx === -1) idx = 0;
+  return order[(idx + 1) % order.length];
 }
 
+/* ============================================================
+   FORÇA DA CARTA
+   · manilha: 1000 + naipe
+   · comum:   valor*10 + naipe (máximo = 3 de paus = 103)
+   Manilha sempre vence qualquer carta comum.
+   ============================================================ */
 function cardStrength(card, manilhaValue) {
-  if (card.rank === manilhaValue) return 100 + SUIT_ORDER[card.suit];
-  return VALUE_ORDER[card.rank] * 10 + SUIT_ORDER[card.suit];
+  const rank = parseInt(card.rank, 10);
+  const man  = parseInt(manilhaValue, 10);
+  if (!isNaN(man) && rank === man) return 1000 + SUIT_ORDER[card.suit];
+  const vo = VALUE_ORDER[rank];
+  if (vo === undefined) return SUIT_ORDER[card.suit];
+  return vo * 10 + SUIT_ORDER[card.suit];
+}
+
+/* retorna true se a carta é manilha */
+function isManilha(card, manilhaValue) {
+  const rank = parseInt(card.rank, 10);
+  const man  = parseInt(manilhaValue, 10);
+  return !isNaN(man) && rank === man;
 }
 
 const G = {
@@ -393,6 +407,8 @@ const G = {
 
   trickNum: 1,
   trickWins: { A: 0, B: 0 },
+  trickWinner: [null, null, null],
+  roundShortCircuit: false,
   cardsOnTable: [],
   turnIdx: 0,
 
@@ -417,6 +433,8 @@ const G = {
 
     this.trickNum = 1;
     this.trickWins = { A:0, B:0 };
+    this.trickWinner = [null, null, null];
+    this.roundShortCircuit = false;
     this.cardsOnTable = [];
     this.turnIdx = 0;
     this.currentLevel = 0;
@@ -450,8 +468,8 @@ const G = {
   cardHTML(card, extra = '', size = '') {
     if (!card) return '';
     if (card._back) return `<div class="card back ${size} ${extra}"></div>`;
-    const isManilha = this.manilhaValue !== null && card.rank === this.manilhaValue;
-    const cls = `card ${card.color} ${size} ${extra} ${isManilha ? 'manilha' : ''}`;
+    const im = this.manilhaValue !== null && isManilha(card, this.manilhaValue);
+    const cls = `card ${card.color} ${size} ${extra} ${im ? 'manilha' : ''}`;
     const rankDisplay = card.rank === 10 ? 'Q' : card.rank === 11 ? 'J' : card.rank === 12 ? 'K' : card.rank;
     return `<div class="${cls}" data-id="${card.id}">
       <div class="stl">${card.sym}</div>
@@ -552,6 +570,7 @@ const G = {
   canHumanPlayNow() {
     if (this.roundOver) return false;
     if (this.negotiation) return false;
+    if (this.roundShortCircuit) return false;
     const seat = this.currentSeat();
     if (this.is1v1()) return seat === 'me';
     if (this.mode === 'cpu') return seat === 'me';
@@ -652,17 +671,17 @@ const G = {
     const myTeam = this.negotiation.raiserTeam === 'A' ? 'B' : 'A';
     const mySeats = this.activeSeats().filter(s => this.teamOf[s] === myTeam);
     const myCards = mySeats.flatMap(s => this.hands[s] || []);
-    const manilhaCount = myCards.filter(c => c.rank === this.manilhaValue).length;
+    const manilhaCount = myCards.filter(c => isManilha(c, this.manilhaValue)).length;
     const maxS = myCards.length ? Math.max(...myCards.map(c => cardStrength(c, this.manilhaValue))) : 0;
 
     const level = this.negotiation.proposedLevel;
     let foldChance;
-    if (manilhaCount >= 2 || maxS >= 97) foldChance = 0.05;
-    else if (manilhaCount === 1 || maxS >= 94) foldChance = 0.15 + level * 0.05;
+    if (manilhaCount >= 2 || maxS >= 997) foldChance = 0.05;
+    else if (manilhaCount === 1 || maxS >= 994) foldChance = 0.15 + level * 0.05;
     else foldChance = 0.35 + level * 0.12;
     foldChance = Math.min(foldChance, 0.85);
 
-    const raiseChance = (manilhaCount >= 2 || maxS >= 98) && level < 4 ? 0.35 : 0;
+    const raiseChance = (manilhaCount >= 2 || maxS >= 998) && level < 4 ? 0.35 : 0;
 
     const roll = Math.random();
     if (roll < foldChance) { this.cpuFold(myTeam); return; }
@@ -755,6 +774,7 @@ const G = {
 
   playCard(seat, card) {
     if (this.roundOver || this.negotiation) return;
+    if (this.roundShortCircuit) return;
     this.hands[seat] = this.hands[seat].filter(c => c.id !== card.id);
     this.cardsOnTable.push({ seat, card });
     this.advanceTurn();
@@ -779,12 +799,14 @@ const G = {
   scheduleCpuIfNeeded() {
     if (this.roundOver) return;
     if (this.negotiation) return;
+    if (this.roundShortCircuit) return;
     const cur = this.currentSeat();
     if (this.isCpuSeat(cur)) setTimeout(() => this.cpuPlay(), 800);
   },
 
   cpuPlay() {
     if (this.roundOver || this.negotiation) return;
+    if (this.roundShortCircuit) return;
     const seat = this.currentSeat();
     if (!this.isCpuSeat(seat)) return;
     const hand = this.hands[seat];
@@ -810,12 +832,20 @@ const G = {
     else this.playCard(seat, strengths[0].c);
   },
 
+  /* ============================================================
+     RESOLVE VAZA
+     · manilha > qualquer carta comum
+     · empate entre DUAS OU MAIS MANILHAS → desempata por naipe
+       (paus > copa > espada > ouro)
+     · empate entre cartas COMUNS → MELÊ, sem exceção
+       (3 contra 3, 2 contra 2, 12 contra 12... sempre empate)
+     ============================================================ */
   resolveTrick() {
     const entries = this.cardsOnTable.map(e => ({
       seat: e.seat,
       card: e.card,
       s: cardStrength(e.card, this.manilhaValue),
-      isManilha: e.card.rank === this.manilhaValue
+      man: isManilha(e.card, this.manilhaValue)
     }));
 
     const maxS = Math.max(...entries.map(x => x.s));
@@ -824,11 +854,13 @@ const G = {
     let winners = top;
 
     if (top.length > 1) {
-      const allManilha = top.every(x => x.isManilha);
+      const allManilha = top.every(x => x.man);
       if (allManilha) {
+        /* empate só entre manilhas → naipe decide */
         const maxSuit = Math.max(...top.map(x => SUIT_ORDER[x.card.suit]));
         winners = top.filter(x => SUIT_ORDER[x.card.suit] === maxSuit);
       } else {
+        /* empate entre cartas comuns → melê (sem exceção) */
         winners = [];
       }
     }
@@ -836,46 +868,99 @@ const G = {
     if (winners.length === 1) {
       const winnerSeat = winners[0].seat;
       const winnerTeam = this.teamOf[winnerSeat];
-      this.trickWins[winnerTeam]++;
+      this.trickWinner[this.trickNum - 1] = winnerTeam;
       this.turnIdx = this.seats.indexOf(winnerSeat);
-      this.toast(`✅ ${this.teamLabel(winnerTeam)} TIQUIRI PIE PIE VAI VAI`);
+      this.toast(`✅ ${this.teamLabel(winnerTeam)} venceu a vaza ${this.trickNum}`);
 
-      if (this.trickWins.A >= 2 || this.trickWins.B >= 2 || this.trickNum === 3) {
-        setTimeout(() => this.endRound(), 1100);
-      } else {
-        setTimeout(() => {
-          this.trickNum++;
-          this.cardsOnTable = [];
-          this.render();
-          this.scheduleCpuIfNeeded();
-        }, 1400);
+      const decision = this.decideRound();
+      if (decision.over) {
+        setTimeout(() => this.endRound(false, decision.winner), 1100);
+        return;
       }
-      return;
-    }
 
-    this.toast('🪢 Vaza empatada -- melê!');
-    if (this.trickNum < 3) {
       setTimeout(() => {
         this.trickNum++;
         this.cardsOnTable = [];
-        this.turnIdx = 0;
         this.render();
         this.scheduleCpuIfNeeded();
       }, 1400);
-    } else {
-      setTimeout(() => this.endRound(true), 1400);
+      return;
     }
+
+    /* vaza empatada (melê) */
+    this.trickWinner[this.trickNum - 1] = null;
+    this.toast(`🪢 Vaza ${this.trickNum} empatada -- melê!`);
+
+    const decision = this.decideRound();
+    if (decision.over) {
+      setTimeout(() => this.endRound(decision.empachada, decision.winner), 1400);
+      return;
+    }
+
+    setTimeout(() => {
+      this.trickNum++;
+      this.cardsOnTable = [];
+      this.turnIdx = 0;
+      this.render();
+      this.scheduleCpuIfNeeded();
+    }, 1400);
   },
 
-  endRound(noWinner = false) {
+  /* ============================================================
+     DECIDE se a mão acabou e quem venceu
+     Regras:
+     · vaza 1 decidida + vaza 2 decidida:
+        - mesma equipe venceu 1 e 2 → essa equipe leva a mão
+        - equipes diferentes → joga vaza 3
+        - vaza 2 empatada → quem ganhou a 1 leva a mão (não joga 3)
+     · vaza 1 empatada (melê):
+        - vaza 2 decidida → quem ganhou a 2 leva a mão (não joga 3)
+        - vaza 2 empatada → joga vaza 3
+     · 3 vazas empatadas → mão empachada
+     ============================================================ */
+  decideRound() {
+    const w1 = this.trickWinner[0];
+    const w2 = this.trickWinner[1];
+    const w3 = this.trickWinner[2];
+    const tn = this.trickNum;
+
+    /* depois da 1ª vaza, sempre continua */
+    if (tn === 1) return { over: false };
+
+    /* depois da 2ª vaza */
+    if (tn === 2) {
+      if (w1 !== null) {
+        /* 1ª decidida + 2ª decidida pela mesma equipe → essa equipe leva */
+        if (w2 === w1) return { over: true, winner: w1, empachada: false };
+        /* 1ª decidida + 2ª empatada → quem ganhou a 1ª leva a mão (não joga 3) */
+        if (w2 === null) return { over: true, winner: w1, empachada: false };
+        /* 1ª decidida por uma equipe + 2ª decidida pela outra → joga 3 */
+        return { over: false };
+      }
+      /* 1ª empatada + 2ª decidida → quem ganhou a 2ª leva a mão (não joga 3) */
+      if (w2 !== null) return { over: true, winner: w2, empachada: false };
+      /* 1ª e 2ª empatadas → joga 3 */
+      return { over: false };
+    }
+
+    /* depois da 3ª vaza */
+    if (tn === 3) {
+      if (w3 !== null) return { over: true, winner: w3, empachada: false };
+      return { over: true, winner: null, empachada: true };
+    }
+
+    return { over: false };
+  },
+
+  endRound(empachada = false, winnerForced = null) {
     this.roundOver = true;
-    let winnerTeam = null;
-    if (!noWinner) {
+    let winnerTeam = winnerForced;
+    if (!empachada && winnerTeam === null) {
       if (this.trickWins.A > this.trickWins.B) winnerTeam = 'A';
       else if (this.trickWins.B > this.trickWins.A) winnerTeam = 'B';
     }
 
-    if (winnerTeam) {
+    if (!empachada && winnerTeam) {
       const pts = LEVEL_PTS[this.currentLevel];
       this.scores[winnerTeam] += pts;
       if (winnerTeam === 'A') { VOZ.play('vitoria'); flutuar('TIQUIRI PIE PIE !', '#22ff55'); }
